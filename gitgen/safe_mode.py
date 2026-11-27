@@ -75,19 +75,23 @@ def mask_text(text: str, report: DiffReport) -> str:
 
 
 def limit_chunks(chunks: list[str], max_files: int, max_lines: int, report: DiffReport) -> list[str]:
-    """최대 파일 수/줄 수를 넘는 부분을 잘라낸다."""
+    """최대 파일 수/줄 수를 넘는 부분을 잘라낸다.
+
+    줄 예산을 파일 수로 균등 배분해, 앞쪽 큰 파일이 예산을 독점하지 않게 한다.
+    """
+    selected = chunks[:max_files]
+    if not selected:
+        return []
+    per_file = max(max_lines // len(selected), 1)
     kept: list[str] = []
-    used_lines = 0
-    for chunk in chunks[:max_files]:
+    for chunk in selected:
         lines = chunk.splitlines(keepends=True)
-        remaining = max_lines - used_lines
-        if remaining <= 0:
-            break
-        if len(lines) > remaining:
-            lines = lines[:remaining] + ["... (safe-mode: 줄 수 제한으로 이후 생략)\n"]
+        if len(lines) > per_file:
+            lines = lines[:per_file] + ["... (safe-mode: 줄 수 제한으로 이후 생략)\n"]
+            report.lines_sent += per_file
+        else:
+            report.lines_sent += len(lines)
         kept.append("".join(lines))
-        used_lines += min(len(lines), remaining)
-    report.lines_sent = used_lines
     return kept
 
 
