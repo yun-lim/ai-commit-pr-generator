@@ -20,6 +20,21 @@ class ParseTest(unittest.TestCase):
         self.assertIn("## How to Test\n- 실행", draft.body)
         self.assertTrue(validate_pr(draft.title, draft.body).ok)
 
+    def test_truncated_json_keeps_completed_values(self):
+        truncated = '{"title": "fix(cli): 오류 처리 개선", "why": ["키 누락 안내"], "what": ["cli.py: 종료 코드'
+        draft = parse_pr(truncated)
+        self.assertEqual(draft.title, "fix(cli): 오류 처리 개선")
+        self.assertIn("## Why\n- 키 누락 안내", draft.body)
+        self.assertNotIn("{", draft.title)
+
+
+class BudgetPromptTest(unittest.TestCase):
+    def test_detail_level_follows_max_tokens(self):
+        from gitgen.prompts import detail_level
+        self.assertEqual(detail_level(150), "간결")
+        self.assertEqual(detail_level(300), "보통")
+        self.assertEqual(detail_level(700), "상세")
+
 
 if __name__ == "__main__":
     unittest.main()
