@@ -52,7 +52,7 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     ctx = parser.add_argument_group("컨텍스트/출력")
     ctx.add_argument("-c", "--context", help="변경 이유·요구사항 (프롬프트에 포함)")
     ctx.add_argument("--lang", choices=("ko", "en"), default="ko", help="작성 언어 (기본: ko)")
-    ctx.add_argument("--save", type=Path, help="결과를 파일로 저장 (git commit -F 용)")
+    ctx.add_argument("--save", type=Path, help="결과 저장 (commit: 메시지 전체, pr: 본문만)")
     ctx.add_argument("--dry-run", action="store_true", help="API를 호출하지 않고 프롬프트만 출력")
     safe = parser.add_argument_group("안전 모드 / 전송 제한")
     safe.add_argument("--safe-mode", action="store_true",
@@ -118,7 +118,7 @@ def _print_outcome(args: argparse.Namespace, outcome: Outcome) -> str:
     output.done("PR 초안 생성 완료")
     output.print_section("PR Title", outcome.draft.title)
     output.print_section("PR Body", outcome.draft.body)
-    return f"{outcome.draft.title}\n\n{outcome.draft.body}"
+    return outcome.draft.body
 
 
 def run(args: argparse.Namespace, cwd: Path) -> int:
@@ -145,7 +145,9 @@ def run(args: argparse.Namespace, cwd: Path) -> int:
     text = _print_outcome(args, outcome)
     if args.save:
         args.save.write_text(text + "\n", encoding="utf-8")
-        output.info(f"저장 완료: {args.save} (예: git commit -F {args.save})")
+        usage = (f"git commit -F {args.save}" if args.command == "commit"
+                 else f'gh pr create --title "<PR Title>" --body-file {args.save}')
+        output.info(f"저장 완료: {args.save} (예: {usage})")
     return EXIT_OK
 
 
