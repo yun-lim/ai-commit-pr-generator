@@ -169,6 +169,10 @@ $ AI_API_KEY=wrong-key python main.py commit # 인증 실패
 $ AI_API_BASE_URL=https://no-such-host.invalid/v1 python main.py commit   # 네트워크 오류
 [ERROR] 네트워크 오류: [Errno 8] nodename nor servname provided, or not known (BASE_URL=...)
 
+$ python main.py pr                          # 요청 한도 초과 (실제 발생: 분당 5회 제한)
+[ERROR] 요청 한도 초과(HTTP 429): 잠시 후 다시 시도하거나 사용량/요금제를 확인하세요.
+  서버 메시지: Rate limit exceeded for openai/gpt-4.1-mini ... limit of 5 requests per minute ... Retry after 60s.
+
 $ python main.py commit -t 5                 # 잘못된 파라미터
 python main.py commit: error: argument -t/--temperature: temperature는 0.0~2.0 범위여야 합니다.
 ```
@@ -183,6 +187,16 @@ python main.py commit: error: argument -t/--temperature: temperature는 0.0~2.0 
 | 빈 응답 / `finish_reason=length` | `--max-tokens` 늘리라는 안내 | 1 / 경고 |
 
 ## 5. 동작 원리
+
+### 설계 결정
+
+| 결정 | 이유 |
+|---|---|
+| Git 수집(`git_collector.py`)과 AI 호출(`ai_client.py`)을 분리 | Git은 로컬 명령이고 실패 원인(저장소 아님, 변경 없음)이 API와 다름. 분리하면 변경이 없을 때 API를 아예 부르지 않아 비용이 0이고, Git 부분은 API 없이 테스트할 수 있음. AI 제공자를 바꿔도 수집 코드는 그대로 둠 |
+| 프롬프트 구성(`prompts.py`)과 출력 포맷팅/검증(`drafts.py`, `validator.py`)을 분리 | 프롬프트는 "AI에게 부탁하는 것", 검증은 "실제로 지켜졌는지 확인하는 것". AI는 규칙을 확률적으로만 지키므로, 규칙을 프롬프트에만 두면 보장이 안 됨. 길이 상수(50/72/80)는 `validator.py`에 한 번만 정의하고 프롬프트가 가져다 써서 두 곳이 어긋나지 않게 함. AI는 JSON 데이터만 내고 `## Why` 같은 템플릿은 코드가 렌더링 |
+| API 파라미터를 CLI 옵션으로 | 같은 diff에 값 하나만 바꿔 다시 실행하는 실험·재현이 쉬움(아래 실험표). 기본값이 있어 평소에는 옵션 없이 쓰고, 코드를 고치지 않고 모델·비용을 조절할 수 있음 |
+| 오류는 `GitError` / `AIClientError`로 모아 `cli.main`에서 한 번에 처리 | 스택 트레이스 대신 "원인 + 조치 방법" 한 줄을 출력하고 종료 코드 1로 끝냄. API Key는 호출 전에 확인해서 요청을 낭비하지 않음. HTTP 상태별로 메시지를 나눈 이유는 401(키 확인)과 429(기다리기)의 조치가 다르기 때문 |
+| 형식 규칙은 기본 "후처리", 선택적으로 `--retry` "재생성" | 후처리는 추가 비용과 지연이 없고 결과가 항상 같음(제목 자르기, 빠진 섹션 채우기). 재생성은 의미까지 고칠 수 있지만 호출이 2배라 미션의 1~2회 권장 범위 안에서 옵션으로만 둠. 모호한 제목처럼 기계적으로 못 고치는 문제는 경고로 사람에게 넘김 |
 
 ### Git 변경 사항 수집 (`gitgen/git_collector.py`)
 - `git rev-parse --show-toplevel`로 프로젝트 루트에서 실행했는지 확인합니다.
@@ -203,8 +217,32 @@ python main.py commit: error: argument -t/--temperature: temperature는 0.0~2.0 
 
 ### 파라미터
 - `temperature`(기본 0.2): 다음 토큰을 고를 때의 무작위성입니다. 커밋 메시지는 사실 요약이므로 낮게 둡니다. 높이면 표현이 다양해지지만 diff에 없는 내용이 섞일 위험이 커집니다.
-- `max_tokens`(기본 700): 응답 길이 상한이자 비용 상한입니다. 너무 작으면 JSON이 중간에 잘립니다(`finish_reason=length`이면 경고). 입력 토큰은 diff 크기가 결정하므로 `--max-diff-chars`와 safe-mode로 따로 제한합니다.
-- `model`: 품질·속도·비용을 함께 결정합니다. 추론(thinking) 모델은 출력 토큰을 추론에 먼저 써서 빈 응답이 나올 수 있습니다.
+- `max_tokens`(기본 700): 응답 길이 상한이자 비용 상한입니다. 값을 프롬프트의 **작성 분량 지침**으로도 넘깁니다.
+  200 이하는 간결(섹션당 불릿 1개), 450 이하는 보통(1~2개), 그보다 크면 상세(2~4개)입니다. 그래서 상한에 걸려 JSON이 잘리는 대신 분량 자체가 줄어듭니다.
+  그래도 잘리면(`finish_reason=length`) 경고를 띄우고, 완성된 값(제목, 닫힌 불릿)만 복구합니다.
+- `model`: 품질·속도·비용을 함께 결정합니다. 추론(thinking) 모델은 출력 토큰을 추론에 먼저 써서 빈 응답이 나올 수 있습니다(`google/gemini-2.5-flash`에서 실제로 발생).
+- 모든 파라미터를 CLI 옵션으로 둔 이유: 같은 diff에 값만 바꿔 다시 실행해서 결과를 비교·재현할 수 있게 하기 위해서입니다. 기본값은 실험으로 정했습니다.
+
+#### 파라미터 실험 (같은 변경 사항, 실제 실행 결과)
+
+`python main.py pr --max-tokens N`: 길이와 디테일이 달라집니다.
+
+| max_tokens | 분량 지침 | 실제 completion 토큰 | 출력 길이 | What 섹션 예시 |
+|---|---|---|---|---|
+| 150 | 간결 | 126 | 611자 | `cli.py에 max_tokens 인자 전달 추가` |
+| 400 | 보통 | 234 | 1,021자 | `cli.py에서 build_commit_messages와 build_pr_messages 호출 시 max_tokens 인자 추가` |
+| 900 | 상세 | 313 | 1,550자 | `gitgen/drafts.py에 JSON 응답이 중간에 잘린 경우에도 title, why, what, how_to_test 필드를 부분 복구하는 salvage_truncated_json 함수 추가 및 extract_json 함수 개선` |
+
+분량 지침을 넣기 전에는 `--max-tokens 60`이면 JSON이 잘려 제목에 `{"title": ...` 원문이 출력되고 본문은 전부 "(작성 필요)"로 채워졌습니다. 이 결과를 보고 분량 지침과 잘린 JSON 복구를 추가했습니다.
+
+`python main.py commit -t T`를 같은 값으로 2번씩 실행: 무작위성이 달라집니다.
+
+| temperature | 1회차 제목 | 2회차 제목 | 관찰 |
+|---|---|---|---|
+| 0 | `feat(cli): max_tokens 인자 추가로 응답 분량 조절 기능 구현` | (1회차와 동일) | 제목 동일, 본문도 거의 동일 → 재현성이 높음 |
+| 1.3 | `feat(param): max_tokens 인자 추가로 출력 분량 제어 구현` | `feat(cli): 최대 토큰 수에 따라 커밋 및 PR 메시지 작성 분량 조절` | 매번 표현이 다르고, "시스템 프롬프트에 반영"(실제로는 user 프롬프트) 같은 부정확한 표현이 섞임 |
+
+결론: 커밋/PR은 사실을 요약하는 일이라 기본값을 `temperature 0.2`, `max_tokens 700`(상세)으로 둡니다. 짧은 요약이 필요하면 `--max-tokens 150`을 씁니다.
 
 ### 검증과 후처리 (`gitgen/validator.py`, `gitgen/generator.py`)
 | 대상 | 규칙 | 위반 시 |
@@ -236,15 +274,28 @@ python main.py commit: error: argument -t/--temperature: temperature는 0.0~2.0 
 - `commit`과 `pr`은 각각 **API 1회 호출**이 기본입니다. `--retry`를 줘도 최대 2회입니다.
 - 비용은 대부분 입력 토큰(diff 크기)에서 나옵니다. 큰 변경은 작게 나눠 커밋하고, lock 파일이나 빌드 산출물은 stage하지 마세요.
 - 이 저장소 기준 1회 호출은 입력 약 1,000~4,000 토큰, 출력 약 100~300 토큰이었습니다.
-- 자동 재시도는 하지 않습니다. 429(한도 초과)나 5xx가 나면 잠시 뒤 직접 다시 실행하세요.
+- 자동 재시도는 하지 않습니다. 429(한도 초과)나 5xx가 나면 잠시 뒤 직접 다시 실행하세요. Vercel AI Gateway 무료 사용량 기준으로 모델별 분당 5회 제한에 실제로 걸린 적이 있습니다.
 
 ### 결과물 사용
 생성된 커밋/PR 문구는 최종 정답이 아닙니다. 사실과 다른 내용이나 테스트 방법이 있는지 검토한 뒤 적용하세요.
+- AI는 diff만 볼 뿐, 왜 바꿨는지(배경)와 실제로 테스트했는지는 모릅니다. 그래서 Why와 How to Test를 그럴듯하게 지어낼 수 있습니다. 이 저장소에서도 `unittest` 프로젝트인데 `pytest tests/`를 쓴 사례가 있었습니다.
+- safe-mode로 일부만 보냈다면 AI는 못 본 파일을 이름만 보고 판단합니다.
+- 커밋 히스토리는 한번 공유하면 바꾸기 어렵고, PR 본문은 리뷰어가 판단하는 근거가 됩니다. 틀린 설명은 리뷰 품질을 떨어뜨립니다.
 
-## 7. 개발
+## 7. 팀 프로젝트 적용 시 개선 우선순위
+
+| 순위 | 기능 | 근거 |
+|---|---|---|
+| 1 | safe-mode 기본 ON + 팀 공용 마스킹 규칙/제외 파일 설정 파일 | 키 유출은 되돌릴 수 없는 사고이고, 팀원마다 옵션을 깜빡할 수 있음. 위험이 가장 크고 구현 비용은 작음 |
+| 2 | 팀 컨벤션(커밋 prefix·scope 목록, PR 템플릿·체크리스트)을 설정 파일로 주입 | 팀마다 형식이 다르고, 형식이 일관되지 않으면 도구를 쓰는 의미가 줄어듦 |
+| 3 | 이슈 번호·브랜치명을 맥락으로 자동 포함 (`Closes #123`) | Why를 AI가 추측하지 않게 하는 가장 확실한 정보원 |
+| 4 | `prepare-commit-msg` Git hook 연동 | 복사·붙여넣기 단계를 없애 실제 사용률을 높임. 단, 검토 단계는 유지 |
+| 5 | 큰 diff는 파일별 요약 후 종합 (map-reduce) | 큰 PR의 정확도 향상. 다만 호출 횟수(비용)가 늘어나 우선순위는 낮음 |
+
+## 8. 개발
 
 ```bash
-python -m unittest discover -s tests -t .    # 31개 테스트 (API 호출 없음, urlopen은 mock)
+python -m unittest discover -s tests -t .    # 33개 테스트 (API 호출 없음, urlopen은 mock)
 python main.py commit --dry-run              # 프롬프트만 확인
 ```
 

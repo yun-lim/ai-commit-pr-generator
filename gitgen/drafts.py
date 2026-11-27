@@ -33,16 +33,43 @@ def _strip_bullet(text: str) -> str:
     return re.sub(r"^\s*[-*]\s+", "", str(text)).strip()
 
 
+JSON_STRING = r'"((?:[^"\\]|\\.)*)"'
+
+
 def extract_json(text: str) -> dict | None:
-    """응답에서 첫 번째 JSON 객체를 꺼낸다 (코드펜스로 감싸도 처리)."""
+    """응답에서 첫 번째 JSON 객체를 꺼낸다 (코드펜스로 감싸도 처리).
+
+    max_tokens에 걸려 JSON이 중간에 잘린 경우, 완성된 값만 복구한다.
+    """
     match = re.search(r"\{[\s\S]*\}", text)
-    if not match:
-        return None
+    if match:
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            return data
+    return salvage_truncated_json(text) if "{" in text else None
+
+
+def _decode(raw: str) -> str:
     try:
-        data = json.loads(match.group(0))
+        return json.loads(f'"{raw}"')
     except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+        return raw
+
+
+def salvage_truncated_json(text: str) -> dict | None:
+    """잘린 JSON에서 닫힌 문자열 값만 골라 dict로 재구성한다."""
+    data: dict[str, object] = {}
+    title = re.search(r'"title"\s*:\s*' + JSON_STRING, text)
+    if title:
+        data["title"] = _decode(title.group(1))
+    for key in ("body", "why", "what", "how_to_test"):
+        array = re.search(rf'"{key}"\s*:\s*\[([\s\S]*?)(?:\]|$)', text)
+        if array:
+            data[key] = [_decode(item) for item in re.findall(JSON_STRING, array.group(1))]
+    return data or None
 
 
 def _as_list(value: object) -> list[str]:

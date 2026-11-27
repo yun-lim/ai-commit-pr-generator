@@ -129,7 +129,7 @@ def run(args: argparse.Namespace, cwd: Path) -> int:
         return EXIT_OK
     diff, report = _prepare(args, changes)
     build = build_commit_messages if args.command == "commit" else build_pr_messages
-    messages = build(changes, diff, args.context, args.lang, report)
+    messages = build(changes, diff, args.context, args.lang, report, args.max_tokens)
     if args.dry_run:
         output.info("dry-run: API를 호출하지 않고 프롬프트만 출력합니다.")
         for message in messages:

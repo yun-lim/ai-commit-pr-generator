@@ -8,6 +8,14 @@ from .validator import COMMIT_TITLE_MAX, COMMIT_TITLE_RECOMMENDED, PR_TITLE_MAX
 
 COMMIT_TYPES = "feat, fix, docs, style, refactor, test, chore, perf, ci, build"
 LANGUAGE_NAMES = {"ko": "한국어", "en": "English"}
+# max_tokens 구간별 작성 분량. 응답이 잘리지 않도록 예산 안에서 분량을 조절하게 한다.
+BRIEF_TOKEN_LIMIT = 200
+NORMAL_TOKEN_LIMIT = 450
+DETAIL_GUIDES = {
+    "간결": "커밋 본문 불릿 1개, PR 섹션당 불릿 1개, 각 불릿 40자 이내. 핵심만 쓸 것",
+    "보통": "커밋 본문 불릿 2개, PR 섹션당 불릿 1~2개, 각 불릿 한 문장",
+    "상세": "커밋 본문 불릿 3개, PR 섹션당 불릿 2~4개, 파일·함수 이름과 동작을 구체적으로",
+}
 
 SYSTEM_PROMPT = (
     "당신은 코드 리뷰 경험이 많은 시니어 소프트웨어 엔지니어입니다. "
@@ -42,6 +50,7 @@ PR_RULES = f"""\
    - why: 변경 배경/문제 상황 (diff와 사용자 맥락에서 추론 가능한 범위만)
    - what: 핵심 변경 사항, 파일/모듈 이름 포함
    - how_to_test: 리뷰어가 그대로 따라 할 수 있는 확인 절차 (실행 명령은 백틱으로 감싸기)
+     테스트 명령은 diff나 사용자 맥락에서 확인된 것만 쓰고, 확인되지 않으면 "테스트 명령 확인 필요"라고 쓸 것
 3. 불릿 문자열 앞에 "-" 기호를 붙이지 않음 (프로그램이 붙임)
 
 [출력 JSON 스키마]
@@ -66,6 +75,18 @@ def describe_scope(report: DiffReport | None) -> str:
     return scope
 
 
+def detail_level(max_tokens: int | None) -> str:
+    if max_tokens is None or max_tokens > NORMAL_TOKEN_LIMIT:
+        return "상세"
+    return "간결" if max_tokens <= BRIEF_TOKEN_LIMIT else "보통"
+
+
+def describe_budget(max_tokens: int | None) -> str:
+    level = detail_level(max_tokens)
+    budget = f"응답 최대 {max_tokens} 토큰 — " if max_tokens else ""
+    return f"[작성 분량] {level}: {budget}{DETAIL_GUIDES[level]}. JSON이 잘리지 않게 예산 안에서 끝낼 것"
+
+
 def _context_block(
     changes: GitChanges, diff: str, user_context: str | None, lang: str, report: DiffReport | None
 ) -> str:
@@ -87,8 +108,10 @@ def build_commit_messages(
     user_context: str | None = None,
     lang: str = "ko",
     report: DiffReport | None = None,
+    max_tokens: int | None = None,
 ) -> list[dict[str, str]]:
-    user = f"{COMMIT_RULES}\n{_context_block(changes, diff, user_context, lang, report)}"
+    user = (f"{COMMIT_RULES}\n{describe_budget(max_tokens)}\n\n"
+            f"{_context_block(changes, diff, user_context, lang, report)}")
     return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
 
 
@@ -98,8 +121,10 @@ def build_pr_messages(
     user_context: str | None = None,
     lang: str = "ko",
     report: DiffReport | None = None,
+    max_tokens: int | None = None,
 ) -> list[dict[str, str]]:
-    user = f"{PR_RULES}\n{_context_block(changes, diff, user_context, lang, report)}"
+    user = (f"{PR_RULES}\n{describe_budget(max_tokens)}\n\n"
+            f"{_context_block(changes, diff, user_context, lang, report)}")
     return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
 
 
