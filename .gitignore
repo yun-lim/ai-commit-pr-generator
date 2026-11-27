@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+.venv/
+venv/
+.omc/
+.DS_Store
+commit_msg.txt
+pr_draft.md
