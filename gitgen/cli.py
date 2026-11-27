@@ -14,7 +14,9 @@ from .ai_client import (
 from .generator import Outcome, generate_commit, generate_pr
 from .git_collector import GitChanges, GitError, collect_commit_changes, collect_pr_changes
 from .prompts import build_commit_messages, build_pr_messages
-from .safe_mode import DEFAULT_MAX_DIFF_CHARS, DEFAULT_MAX_FILES, DEFAULT_MAX_LINES, prepare_diff
+from .safe_mode import (
+    DEFAULT_MAX_DIFF_CHARS, DEFAULT_MAX_FILES, DEFAULT_MAX_LINES, DiffReport, prepare_diff,
+)
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -87,7 +89,7 @@ def _collect(args: argparse.Namespace, cwd: Path) -> GitChanges:
     return changes
 
 
-def _prepare(args: argparse.Namespace, changes: GitChanges) -> str:
+def _prepare(args: argparse.Namespace, changes: GitChanges) -> tuple[str, DiffReport]:
     diff, report = prepare_diff(
         changes.diff, args.safe_mode, args.max_files, args.max_lines, args.max_diff_chars)
     if args.safe_mode:
@@ -98,7 +100,7 @@ def _prepare(args: argparse.Namespace, changes: GitChanges) -> str:
             output.info(f"safe-mode: 민감 파일 제외 → {', '.join(report.excluded_files)}")
     if report.truncated_chars:
         output.warn(f"diff가 {args.max_diff_chars}자를 넘어 일부만 전송합니다.")
-    return diff
+    return diff, report
 
 
 def _print_outcome(args: argparse.Namespace, outcome: Outcome) -> str:
@@ -125,9 +127,9 @@ def run(args: argparse.Namespace, cwd: Path) -> int:
         target = "커밋 메시지" if args.command == "commit" else "PR 초안"
         output.info(f"변경 사항이 없습니다. {target}를 생성하지 않고 종료합니다.")
         return EXIT_OK
-    diff = _prepare(args, changes)
+    diff, report = _prepare(args, changes)
     build = build_commit_messages if args.command == "commit" else build_pr_messages
-    messages = build(changes, diff, args.context, args.lang)
+    messages = build(changes, diff, args.context, args.lang, report)
     if args.dry_run:
         output.info("dry-run: API를 호출하지 않고 프롬프트만 출력합니다.")
         for message in messages:

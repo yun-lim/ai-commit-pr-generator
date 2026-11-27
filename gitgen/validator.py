@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 COMMIT_TITLE_RECOMMENDED = 50
 COMMIT_TITLE_MAX = 72
 PR_TITLE_MAX = 80
+COMMIT_BODY_MAX_BULLETS = 3
 PR_SECTIONS = ("Why", "What", "How to Test")
 PLACEHOLDER_BULLET = "- (작성 필요: AI 초안에 내용이 없어 직접 보완하세요)"
 
@@ -70,8 +71,12 @@ def validate_commit(message: str) -> ValidationResult:
     if body and body[0].strip():
         result.errors.append("커밋 제목과 본문 사이에 빈 줄이 필요합니다.")
     body_text = [line for line in body if line.strip()]
-    if body_text and not any(BULLET.match(line) for line in body_text):
+    bullet_count = sum(1 for line in body_text if BULLET.match(line))
+    if body_text and not bullet_count:
         result.errors.append("커밋 본문에 핵심 변경 사항 불릿(- ...)이 없습니다.")
+    if bullet_count > COMMIT_BODY_MAX_BULLETS:
+        result.warnings.append(
+            f"커밋 본문 불릿이 {bullet_count}개입니다 ({COMMIT_BODY_MAX_BULLETS}개 이하 권장).")
     return result
 
 
